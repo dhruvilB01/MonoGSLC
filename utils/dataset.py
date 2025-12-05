@@ -55,15 +55,23 @@ class TUMParser:
         data = np.loadtxt(filepath, delimiter=" ", dtype=np.unicode_, skiprows=skiprows)
         return data
 
-    def associate_frames(self, tstamp_image, tstamp_depth, tstamp_pose, max_dt=0.08):
+    def associate_frames(self, tstamp_image, tstamp_depth, tstamp_pose, max_dt=0.08, pose_offset=-2.04, 
+    ):
         associations = []
+
+        # apply offset correction if poses exist
+        if tstamp_pose is not None:
+            tstamp_pose = tstamp_pose - pose_offset
+            # (-2.04) becomes addition of +2.04 seconds
+
         for i, t in enumerate(tstamp_image):
             if tstamp_pose is None:
+                # RGB–Depth only
                 j = np.argmin(np.abs(tstamp_depth - t))
                 if np.abs(tstamp_depth[j] - t) < max_dt:
                     associations.append((i, j))
-
             else:
+                # RGB–Depth–Pose association
                 j = np.argmin(np.abs(tstamp_depth - t))
                 k = np.argmin(np.abs(tstamp_pose - t))
 

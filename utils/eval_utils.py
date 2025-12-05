@@ -101,16 +101,27 @@ def eval_ate(frames, kf_ids, save_dir, iterations, final=False, monocular=False)
         os.path.join(plot_dir, f"trj_{label_evo}.json"), "w", encoding="utf-8"
     ) as f:
         json.dump(trj_data, f, indent=4)
-
-    ate = evaluate_evo(
+        
+    # Automatically handle full vs. partial GT
+    results = evaluate_sequence_auto(
         poses_gt=trj_gt_np,
         poses_est=trj_est_np,
         plot_dir=plot_dir,
         label=label_evo,
-        monocular=monocular,
+        monocular=monocular
     )
-    wandb.log({"frame_idx": latest_frame_idx, "ate": ate})
-    return ate
+
+    # Log whatever metrics were available
+    wandb_data = {"frame_idx": latest_frame_idx}
+    wandb_data.update({
+        "ate": results.get("ate", None),
+        "rpe": results.get("rpe", None),
+        "start_end_alignment_error": results.get("start_end_alignment_error", None),
+        "drift_ratio": results.get("drift_ratio", None),
+    })
+    wandb.log(wandb_data)
+
+    return results
 
 
 def eval_rendering(
@@ -190,3 +201,75 @@ def save_gaussians(gaussians, name, iteration, final=False):
             name, "point_cloud/iteration_{}".format(str(iteration))
         )
     gaussians.save_ply(os.path.join(point_cloud_path, "point_cloud.ply"))
+
+def evaluate_rpe(poses_gt, poses_est, plot_dir, label, delta=1):
+    traj_ref = trajectory.PosePath3D(poses_se3=poses_gt)
+    traj_est = trajectory.PosePath3D(poses_se3=poses_est)
+    rpe_metric = metrics.RPE(
+        metrics.PoseRelation.translation_part,
+        delta=delta,
+        delta_unit=metrics.Unit.frames
+    )
+    rpe_metric.process_data((traj_ref, traj_est))
+    rpe_rmse = rpe_metric.get_statistic(metrics.StatisticsType.rmse)
+    Log(f"RMSE RPE [m]: {rpe_rmse}", tag="Eval")
+    json.dump(
+        rpe_metric.get_all_statistics(),
+        open(os.path.join(plot_dir, f"rpe_stats_{label}.json"), "w"),
+        indent=4
+    )
+    return rpe_rmse
+    
+def start_end_alignment_error(poses_gt, poses_est):
+    start_est, end_est = poses_est[0][:3,3], poses_est[-1][:3,3]
+    start_gt, end_gt   = poses_gt[0][:3,3], poses_gt[-1][:3,3]
+    return float(np.linalg.norm((end_est - start_est) - (end_gt - start_gt)))
+
+def drift_ratio(ate_rmse, poses_gt):
+    total_length = sum(
+        np.linalg.norm(poses_gt[i+1][:3,3] - poses_gt[i][:3,3])
+        for i in range(len(poses_gt)-1)
+    )
+    return float(ate_rmse / total_length)
+
+def evaluate_sequence_auto(poses_gt, poses_est, plot_dir, label, monocular=False):
+    """
+    Automatically select metrics based on ground truth availability.
+    If full ground truth is provided, compute ATE + RPE.
+    Otherwise, compute start-end alignment and drift ratio only.
+    """
+    # Require at least 2 GT poses
+    if poses_gt is None or len(poses_gt) < 2:
+        Log("No ground truth provided — skipping evaluation.", tag="Eval")
+        return None
+
+    # Check if we have full ground truth coverage (simple heuristic)
+    full_gt = len(poses_gt) > len(poses_est) * 0.8
+    results = {}
+
+    if full_gt:
+        # --- Full GT: ATE + RPE ---
+        ate = evaluate_evo(
+            poses_gt=poses_gt,
+            poses_est=poses_est,
+            plot_dir=plot_dir,
+            label=label,
+            monocular=monocular,
+        )
+        rpe = evaluate_rpe(poses_gt, poses_est, plot_dir, label)
+        results.update({"ate": ate, "rpe": rpe})
+    else:
+        # --- Partial GT: Start-End + Drift Ratio ---
+        start_end_err = start_end_alignment_error(poses_gt, poses_est)
+        # Here we use start-end drift instead of ATE for ratio
+        drift = start_end_err / sum(
+            np.linalg.norm(poses_gt[i + 1][:3, 3] - poses_gt[i][:3, 3])
+            for i in range(len(poses_gt) - 1)
+        )
+        results.update({
+            "start_end_alignment_error": start_end_err,
+            "drift_ratio": drift
+        })
+        Log(f"Start-End error [m]: {start_end_err:.4f}, Drift ratio: {drift:.6f}", tag="Eval")
+
+    return results
