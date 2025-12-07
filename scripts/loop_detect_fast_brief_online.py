@@ -298,6 +298,16 @@ def main():
         "num_candidates": len(matches),
         "num_loop_groups": num_loops,
         "groups": {int(k): [int(x) for x in v] for k, v in groups.items()},
+        "detections": [
+            {
+                "i": int(m.i),
+                "j": int(m.j),
+                "score_inliers": int(m.score_inliers),
+                "inlier_ratio": float(m.inlier_ratio),
+                "good_matches": int(m.good_matches),
+            }
+            for m in matches
+        ],
     }
 
     print(json.dumps({k: summary[k] for k in ("num_frames", "num_candidates", "num_loop_groups")}, indent=2))

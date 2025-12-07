@@ -37,6 +37,7 @@ class BackEnd(mp.Process):
         self.current_window = []
         self.initialized = not self.monocular
         self.keyframe_optimizers = None
+        self.loop_events = []
 
     def set_hyperparams(self):
         self.save_results = self.config["Results"]["save_results"]
@@ -364,6 +365,42 @@ class BackEnd(mp.Process):
         msg = [tag, clone_obj(self.gaussians), self.occ_aware_visibility, keyframes]
         self.frontend_queue.put(msg)
 
+    def handle_loop_closure(self, event):
+        anchor_idx = event.get("anchor_idx")
+        query_idx = event.get("query_idx")
+        if anchor_idx not in self.viewpoints or query_idx not in self.viewpoints:
+            return
+        Log(
+            f"Loop closure detected anchor={anchor_idx} query={query_idx} "
+            f"score={event.get('score', 0.0):.3f} "
+            f"inliers={event.get('inliers', 0)}"
+        )
+        anchor = self.viewpoints[anchor_idx]
+        query = self.viewpoints[query_idx]
+        rel_pose = torch.tensor(event["rel_pose"], dtype=torch.float32, device=self.device)
+
+        T_anchor = torch.eye(4, device=self.device)
+        T_anchor[:3, :3] = anchor.R
+        T_anchor[:3, 3] = anchor.T
+        T_query = rel_pose @ T_anchor
+
+        query.update_RT(T_query[:3, :3].clone(), T_query[:3, 3].clone())
+        self.loop_events.append(event)
+
+        window = []
+        seen = set()
+        for idx in self.current_window + [anchor_idx, query_idx]:
+            if idx in seen:
+                continue
+            seen.add(idx)
+            window.append(idx)
+        max_window = self.config["Training"]["window_size"]
+        self.current_window = window[-max_window:]
+
+        self.map(self.current_window, iters=self.mapping_itr_num)
+        self.map(self.current_window, prune=True, iters=10)
+        self.push_to_frontend("loop_closure")
+
     def run(self):
         while True:
             if self.backend_queue.empty():
@@ -473,6 +510,9 @@ class BackEnd(mp.Process):
                     self.map(self.current_window, iters=iter_per_kf)
                     self.map(self.current_window, prune=True)
                     self.push_to_frontend("keyframe")
+                elif data[0] == "loop_closure":
+                    event = data[1]
+                    self.handle_loop_closure(event)
                 else:
                     raise Exception("Unprocessed data", data)
         while not self.backend_queue.empty():

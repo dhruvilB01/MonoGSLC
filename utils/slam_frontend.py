@@ -7,6 +7,7 @@ import torch.multiprocessing as mp
 from gaussian_splatting.gaussian_renderer import render
 from gaussian_splatting.utils.graphics_utils import getProjectionMatrix2, getWorld2View2
 from gui import gui_utils
+from loop_closure.dino_clip_detector import DinoClipLoopDetector
 from utils.camera_utils import Camera
 from utils.eval_utils import eval_ate, save_gaussians
 from utils.logging_utils import Log
@@ -42,6 +43,7 @@ class FrontEnd(mp.Process):
         self.cameras = dict()
         self.device = "cuda:0"
         self.pause = False
+        self.loop_detector = None
 
     def set_hyperparams(self):
         self.save_dir = self.config["Results"]["save_dir"]
@@ -53,6 +55,38 @@ class FrontEnd(mp.Process):
         self.kf_interval = self.config["Training"]["kf_interval"]
         self.window_size = self.config["Training"]["window_size"]
         self.single_thread = self.config["Training"]["single_thread"]
+        loop_cfg = self.config.get("LoopClosure", {"enabled": False})
+        if loop_cfg.get("enabled", False):
+            intrinsics = {
+                "fx": self.dataset.fx,
+                "fy": self.dataset.fy,
+                "cx": self.dataset.cx,
+                "cy": self.dataset.cy,
+            }
+            self.loop_detector = DinoClipLoopDetector(loop_cfg, intrinsics)
+        else:
+            self.loop_detector = None
+
+    def _maybe_run_loop_closure(self, cur_frame_idx, viewpoint):
+        if self.loop_detector is None or not self.loop_detector.is_enabled():
+            return
+        color = (
+            viewpoint.original_image.detach()
+            .cpu()
+            .permute(1, 2, 0)
+            .numpy()
+        )
+        color = (np.clip(color, 0.0, 1.0) * 255).astype(np.uint8)
+        depth = viewpoint.depth
+        if isinstance(depth, torch.Tensor):
+            depth_np = depth.detach().cpu().numpy()
+        elif depth is None:
+            depth_np = None
+        else:
+            depth_np = np.array(depth)
+        detection = self.loop_detector.register_keyframe(cur_frame_idx, color, depth_np)
+        if detection is not None:
+            self.backend_queue.put(["loop_closure", detection])
 
     def add_new_keyframe(self, cur_frame_idx, depth=None, opacity=None, init=False):
         rgb_boundary_threshold = self.config["Training"]["rgb_boundary_threshold"]
@@ -454,6 +488,7 @@ class FrontEnd(mp.Process):
                     self.request_keyframe(
                         cur_frame_idx, viewpoint, self.current_window, depth_map
                     )
+                    self._maybe_run_loop_closure(cur_frame_idx, viewpoint)
                 else:
                     self.cleanup(cur_frame_idx)
                 cur_frame_idx += 1

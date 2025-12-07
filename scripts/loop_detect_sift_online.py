@@ -159,7 +159,10 @@ def knn_ratio_match(
         bf = cv2.BFMatcher(cv2.NORM_L2, crossCheck=False)
         knn = bf.knnMatch(desc_q, desc_t, k=2)
     good = []
-    for m, n in knn:
+    for pair in knn:
+        if len(pair) < 2:
+            continue  # FLANN sometimes yields <k neighbors; skip incomplete entries
+        m, n = pair
         if m.distance < ratio * n.distance:
             good.append(m)
     good.sort(key=lambda x: x.distance)
@@ -198,6 +201,7 @@ def detect_loops_online(
     matcher = create_matcher()
 
     database: List[FrameFeatures] = []
+    db_offset = 0  # absolute index of database[0]
     matches_found: List[MatchResult] = []
     groups: Dict[int, List[int]] = {}
 
@@ -209,7 +213,12 @@ def detect_loops_online(
         best: Optional[MatchResult] = None
         j_candidates = list(range(0, max(0, i - min_gap), search_stride))
         for j in j_candidates:
-            ref = database[j]
+            if j < db_offset:
+                continue  # dropped from sliding window
+            rel_idx = j - db_offset
+            if rel_idx < 0 or rel_idx >= len(database):
+                continue
+            ref = database[rel_idx]
             good = knn_ratio_match(matcher, desc_i, ref.descriptors, ratio_thresh)
             if len(good) < min_inliers:
                 continue
@@ -230,6 +239,7 @@ def detect_loops_online(
         database.append(FrameFeatures(idx=i, path=path, keypoints=kp_i, descriptors=desc_i))
         if max_db is not None and len(database) > max_db:
             database.pop(0)
+            db_offset += 1
 
     for anchor_j, idx_list in groups.items():
         paths = [frames[anchor_j]] + [frames[k] for k in sorted(idx_list)]
@@ -286,6 +296,16 @@ def main():
         "num_candidates": len(matches),
         "num_loop_groups": num_loops,
         "groups": {int(k): [int(x) for x in v] for k, v in groups.items()},
+        "detections": [
+            {
+                "i": int(m.i),
+                "j": int(m.j),
+                "score_inliers": int(m.score_inliers),
+                "inlier_ratio": float(m.inlier_ratio),
+                "good_matches": int(m.good_matches),
+            }
+            for m in matches
+        ],
     }
 
     print(json.dumps({k: summary[k] for k in ("num_frames", "num_candidates", "num_loop_groups")}, indent=2))

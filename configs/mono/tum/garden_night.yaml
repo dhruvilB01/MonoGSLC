@@ -3,17 +3,33 @@ Results:
   save_dir: "results"
   save_trj: True
   save_trj_kf_intv: 10
-  use_gui: ture
+  use_gui: True
   eval_rendering: False
-  use_wandb: False
+  use_wandb: True
 
 Dataset:
   type: 'tum'
   sensor_type: 'monocular'
+  dataset_path: "/media/trieu/TRIEU_DATA/garden_small_night/garden_small_night_TUM"
   pcd_downsample: 64
   pcd_downsample_init: 32
   adaptive_pointsize: True
   point_size: 0.01
+
+  Calibration:
+    fx: 306.4922725227081
+    fy: 306.14812355174007
+    cx: 320.22100395920455
+    cy: 234.9227867128218
+    k1: -0.04083806866524706
+    k2: 0.010512320631044807
+    p1: -0.020992672094212645
+    p2: 0.008848039004781132
+    k3: 0.0                # added: required by cv2.initUndistortRectifyMap
+    width: 640            # 4Seasons PiCam resolution
+    height: 480
+    distorted: False       # dataset is likely pre-rectified
+    depth_scale: 1.0       # safe default for monocular (no depth)
 
 Training:
   init_itr_num: 1050
@@ -76,22 +92,3 @@ model_params:
 pipeline_params:
   convert_SHs_python: False
   compute_cov3D_python: False
-
-LoopClosure:
-  enabled: False
-  detector: "dinoclip"
-  models: ["dinov2"]
-  weights: [1.0]
-  threshold: 0.9
-  min_gap: 120
-  cooldown: 60
-  max_db: 600
-  detector_stride: 1
-  use_powerlaw: True
-  tta_flip: True
-  orb:
-    nfeatures: 2000
-    ratio_thresh: 0.75
-    min_inliers: 60
-    min_inlier_ratio: 0.5
-    ransac_thresh: 2.0

@@ -231,6 +231,10 @@ def main():
                 "detected_loops": len(summary),
                 "loops": summary,
                 "embed_dim": dim,
+                "detections": [
+                    {"i": int(e["i"]), "j": int(e["j"]), "score": float(e["score"])}
+                    for e in events
+                ],
             },
             f,
             indent=2,

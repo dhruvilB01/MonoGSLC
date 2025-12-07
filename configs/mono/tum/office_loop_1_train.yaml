@@ -3,17 +3,34 @@ Results:
   save_dir: "results"
   save_trj: True
   save_trj_kf_intv: 10
-  use_gui: ture
-  eval_rendering: False
-  use_wandb: False
+  use_gui: False
+  eval_rendering: True
+  use_wandb: True
 
 Dataset:
   type: 'tum'
   sensor_type: 'monocular'
+  dataset_path: "/media/trieu/TRIEU_DATA/office_loop_1_train/recording_2020-04-07_10-20-32_TUM"
   pcd_downsample: 64
   pcd_downsample_init: 32
   adaptive_pointsize: True
   point_size: 0.01
+
+  Calibration:
+    fx: 501.4757919305817
+    fy: 501.4757919305817
+    cx: 421.7953735163109
+    cy: 167.65799492501083
+    k1: 0.0
+    k2: 0.0
+    p1: 0.0
+    p2: 0.0
+    k3: 0.0
+    width: 800
+    height: 400
+    distorted: False
+    depth_scale: 1.0
+   
 
 Training:
   init_itr_num: 1050
@@ -76,22 +93,20 @@ model_params:
 pipeline_params:
   convert_SHs_python: False
   compute_cov3D_python: False
-
+ 
 LoopClosure:
-  enabled: False
+  enabled: True
   detector: "dinoclip"
-  models: ["dinov2"]
-  weights: [1.0]
-  threshold: 0.9
-  min_gap: 120
-  cooldown: 60
-  max_db: 600
+  models: ["dinov2", "clip-b32"]
+  weights: [0.7, 0.3]
+  threshold: 0.92
+  min_gap: 300
+  cooldown: 120
+  max_db: 800
   detector_stride: 1
-  use_powerlaw: True
-  tta_flip: True
   orb:
-    nfeatures: 2000
-    ratio_thresh: 0.75
-    min_inliers: 60
-    min_inlier_ratio: 0.5
+    nfeatures: 3000
+    ratio_thresh: 0.7
+    min_inliers: 80
+    min_inlier_ratio: 0.55
     ransac_thresh: 2.0

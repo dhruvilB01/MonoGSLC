@@ -267,6 +267,10 @@ def run_online(
         "cluster_window": cluster_window,
         "detected_loops": len(loops_summary),
         "loops": loops_summary,
+        "detections": [
+            {"i": int(e["i"]), "j": int(e["j"]), "score": float(e["score"])}
+            for e in events
+        ],
     }
     with open(os.path.join(out_dir, "summary.json"), "w") as f:
         json.dump(summary, f, indent=2)
