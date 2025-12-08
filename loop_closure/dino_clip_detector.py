@@ -26,7 +26,8 @@ class LoopClosureDetection:
     inliers: int
     inlier_ratio: float
     good_matches: int
-    rel_pose: np.ndarray  # 4x4 world->camera transform delta
+    rel_pose: np.ndarray  # 4x4 camera->camera transform delta
+    metric_scale: bool = True
 
     def as_message(self) -> Dict:
         return {
@@ -37,6 +38,7 @@ class LoopClosureDetection:
             "inlier_ratio": float(self.inlier_ratio),
             "good_matches": int(self.good_matches),
             "rel_pose": self.rel_pose.tolist(),
+            "metric_scale": bool(self.metric_scale),
         }
 
 
@@ -186,11 +188,18 @@ class DinoClipLoopDetector:
     ) -> Optional[np.ndarray]:
         if depth_map is None:
             return None
+        if isinstance(depth_map, list):
+            depth_map = np.asarray(depth_map)
         x, y = kp.pt
         ix, iy = int(round(x)), int(round(y))
         if iy < 0 or iy >= depth_map.shape[0] or ix < 0 or ix >= depth_map.shape[1]:
             return None
-        z = float(depth_map[iy, ix])
+        z_val = depth_map[iy, ix]
+        if isinstance(z_val, np.ndarray):
+            if z_val.size == 0:
+                return None
+            z_val = z_val.reshape(-1)[0]
+        z = float(z_val)
         if not np.isfinite(z) or z <= 0:
             return None
         X = (x - cx) * z / fx
@@ -254,6 +263,7 @@ class DinoClipLoopDetector:
             inlier_ratio=inlier_ratio,
             good_matches=len(matches),
             rel_pose=rel_pose,
+            metric_scale=False,
         )
 
     def _verify_with_pnp(
@@ -319,6 +329,7 @@ class DinoClipLoopDetector:
             inlier_ratio=inlier_ratio,
             good_matches=len(good),
             rel_pose=rel_pose,
+            metric_scale=True,
         )
 
     def register_keyframe(

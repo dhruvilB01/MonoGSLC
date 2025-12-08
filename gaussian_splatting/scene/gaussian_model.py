@@ -10,6 +10,7 @@
 #
 
 import os
+import warnings
 
 import numpy as np
 import open3d as o3d
@@ -171,6 +172,21 @@ class GaussianModel:
         self.ply_input = pcd
 
         fused_point_cloud = torch.from_numpy(np.asarray(pcd.points)).float().cuda()
+        num_points = fused_point_cloud.shape[0]
+        if num_points == 0:
+            warnings.warn(
+                "No valid points generated for keyframe; skipping Gaussian creation.",
+                RuntimeWarning,
+            )
+            feature_dim = (self.max_sh_degree + 1) ** 2
+            features = torch.zeros((0, 3, feature_dim), dtype=torch.float32, device="cuda")
+            scales = torch.zeros((0, 1), dtype=torch.float32, device="cuda")
+            if not self.isotropic:
+                scales = scales.repeat(1, 3)
+            rots = torch.zeros((0, 4), dtype=torch.float32, device="cuda")
+            opacities = torch.zeros((0, 1), dtype=torch.float32, device="cuda")
+            return fused_point_cloud, features, scales, rots, opacities
+
         fused_color = RGB2SH(torch.from_numpy(np.asarray(pcd.colors)).float().cuda())
         features = (
             torch.zeros((fused_color.shape[0], 3, (self.max_sh_degree + 1) ** 2))
@@ -180,24 +196,16 @@ class GaussianModel:
         features[:, :3, 0] = fused_color
         features[:, 3:, 1:] = 0.0
 
-        dist2 = (
-            torch.clamp_min(
-                distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().cuda()),
-                0.0000001,
-            )
-            * point_size
-        )
+        dist2 = torch.clamp_min(distCUDA2(fused_point_cloud), 0.0000001) * point_size
         scales = torch.log(torch.sqrt(dist2))[..., None]
         if not self.isotropic:
             scales = scales.repeat(1, 3)
 
-        rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
+        rots = torch.zeros((num_points, 4), device="cuda")
         rots[:, 0] = 1
         opacities = inverse_sigmoid(
             0.5
-            * torch.ones(
-                (fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"
-            )
+            * torch.ones((num_points, 1), dtype=torch.float, device="cuda")
         )
 
         return fused_point_cloud, features, scales, rots, opacities

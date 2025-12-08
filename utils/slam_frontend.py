@@ -54,6 +54,9 @@ class FrontEnd(mp.Process):
         self.tracking_itr_num = self.config["Training"]["tracking_itr_num"]
         self.kf_interval = self.config["Training"]["kf_interval"]
         self.window_size = self.config["Training"]["window_size"]
+        self.use_every_n_frames = max(
+            1, int(self.config["Training"].get("frame_stride", 1))
+        )
         self.single_thread = self.config["Training"]["single_thread"]
         loop_cfg = self.config.get("LoopClosure", {"enabled": False})
         if loop_cfg.get("enabled", False):
@@ -415,7 +418,7 @@ class FrontEnd(mp.Process):
                 if self.reset:
                     self.initialize(cur_frame_idx, viewpoint)
                     self.current_window.append(cur_frame_idx)
-                    cur_frame_idx += 1
+                    cur_frame_idx += self.use_every_n_frames
                     continue
 
                 self.initialized = self.initialized or (
@@ -440,7 +443,7 @@ class FrontEnd(mp.Process):
 
                 if self.requested_keyframe > 0:
                     self.cleanup(cur_frame_idx)
-                    cur_frame_idx += 1
+                    cur_frame_idx += self.use_every_n_frames
                     continue
 
                 last_keyframe_idx = self.current_window[0]
@@ -491,7 +494,7 @@ class FrontEnd(mp.Process):
                     self._maybe_run_loop_closure(cur_frame_idx, viewpoint)
                 else:
                     self.cleanup(cur_frame_idx)
-                cur_frame_idx += 1
+                cur_frame_idx += self.use_every_n_frames
 
                 if (
                     self.save_results
