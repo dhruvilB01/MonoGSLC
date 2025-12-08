@@ -41,7 +41,7 @@ import numpy as np
 import torch
 from evo.core import metrics, trajectory
 from evo.core.metrics import PoseRelation, Unit
-from evo.core.trajectory import PosePath3D, PoseTrajectory3D
+from evo.core.trajectory import PosePath3D, PoseTrajectory3D, align_trajectory
 from evo.tools import plot
 from evo.tools.plot import PlotMode
 from evo.tools.settings import SETTINGS
@@ -58,10 +58,11 @@ from utils.logging_utils import Log
 
 def evaluate_evo(poses_gt, poses_est, plot_dir, label, monocular=False):
     ## Plot
-    traj_ref = PosePath3D(poses_se3=poses_gt)
-    traj_est = PosePath3D(poses_se3=poses_est)
-    traj_est_aligned = PosePath3D(poses_se3=[pose.copy() for pose in traj_est.poses_se3])
-    traj_est_aligned.align(traj_ref, correct_scale=monocular)
+    timestamps = np.arange(len(poses_gt)) * 0.1
+    traj_ref = PoseTrajectory3D(poses_se3=poses_gt, timestamps=timestamps)
+    traj_est = PoseTrajectory3D(poses_se3=poses_est, timestamps=timestamps)
+    traj_est_aligned = PoseTrajectory3D(poses_se3=[pose.copy() for pose in traj_est.poses_se3], timestamps=timestamps)
+    traj_est_aligned = align_trajectory(traj_est_aligned, traj_ref, correct_scale=monocular)
 
     ## RMSE
     pose_relation = metrics.PoseRelation.translation_part

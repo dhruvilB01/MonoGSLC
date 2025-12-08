@@ -10,7 +10,7 @@ Results:
 Dataset:
   type: 'tum'
   sensor_type: 'monocular'
-  dataset_path: "/media/trieu/TRIEU_DATA/office_loop_1_train/recording_2020-04-07_10-20-32_TUM"
+  dataset_path: "/home/dhruvil/EC720/GS_SLAM/MonoGSLC/datasets/recording_2020-04-07_10-20-32/recording_2020-04-07_10-20-32_TUM"
   pcd_downsample: 64
   pcd_downsample_init: 32
   adaptive_pointsize: True
@@ -99,14 +99,14 @@ LoopClosure:
   detector: "dinoclip"
   models: ["dinov2", "clip-b32"]
   weights: [0.7, 0.3]
-  threshold: 0.92
-  min_gap: 300
-  cooldown: 120
+  threshold: 0.82
+  min_gap: 50
+  cooldown: 30
   max_db: 800
   detector_stride: 1
   orb:
-    nfeatures: 3000
+    nfeatures: 4000
     ratio_thresh: 0.7
-    min_inliers: 80
-    min_inlier_ratio: 0.55
+    min_inliers: 40
+    min_inlier_ratio: 0.4
     ransac_thresh: 2.0

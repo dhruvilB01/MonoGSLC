@@ -190,7 +190,11 @@ class DinoClipLoopDetector:
         ix, iy = int(round(x)), int(round(y))
         if iy < 0 or iy >= depth_map.shape[0] or ix < 0 or ix >= depth_map.shape[1]:
             return None
-        z = float(depth_map[iy, ix])
+        z_val = depth_map[iy, ix]
+        if isinstance(z_val, np.ndarray):
+            z = float(z_val.item())
+        else:
+            z = float(z_val)
         if not np.isfinite(z) or z <= 0:
             return None
         X = (x - cx) * z / fx
