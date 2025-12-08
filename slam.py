@@ -248,6 +248,9 @@ if __name__ == "__main__":
         )
         wandb.define_metric("frame_idx")
         wandb.define_metric("ate*", step_metric="frame_idx")
+        wandb.define_metric("rpe", step_metric="frame_idx")
+        wandb.define_metric("loop_alighment_error", step_metric="frame_idx")
+        wandb.define_metric("drift_ratio", step_metric="frame_idx")
 
     slam = SLAM(config, save_dir=save_dir)
 
