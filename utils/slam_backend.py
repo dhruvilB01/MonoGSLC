@@ -1,9 +1,11 @@
+import os
 import random
 import time
 
 import numpy as np
 import torch
 import torch.multiprocessing as mp
+from PIL import Image, ImageDraw
 from evo.core import metrics
 from evo.core.trajectory import PosePath3D
 from tqdm import tqdm
@@ -12,6 +14,7 @@ import wandb
 
 from gaussian_splatting.gaussian_renderer import render
 from gaussian_splatting.utils.loss_utils import l1_loss, ssim
+from gaussian_splatting.utils.system_utils import mkdir_p
 from utils.logging_utils import Log
 from utils.multiprocessing_utils import clone_obj
 from utils.pose_utils import update_pose
@@ -91,6 +94,11 @@ class BackEnd(mp.Process):
             "freeze_active_window", False
         )
         self.pose_graph_loop_counter = 0
+        save_dir = self.config["Results"].get("save_dir")
+        self.loop_closure_viz_dir = None
+        if save_dir:
+            self.loop_closure_viz_dir = os.path.join(save_dir, "loop_closures")
+            mkdir_p(self.loop_closure_viz_dir)
         loop_cfg = self.config.get("LoopClosure", {})
         self.loop_max_ate_increase = loop_cfg.get("max_ate_increase", 0.0)
         self.loop_min_ate_improvement = loop_cfg.get("min_ate_improvement", None)
@@ -279,6 +287,90 @@ class BackEnd(mp.Process):
             pts_h = torch.cat([pts, ones], dim=1)
             pts_trans = (sim3 @ pts_h.transpose(0, 1)).transpose(0, 1)
             self.gaussians._xyz[mask] = pts_trans[:, :3]
+
+    def _viewpoint_to_image(self, viewpoint):
+        if (
+            viewpoint is None
+            or getattr(viewpoint, "original_image", None) is None
+            or viewpoint.original_image is None
+        ):
+            return None
+        tensor = viewpoint.original_image
+        if not torch.is_tensor(tensor):
+            return None
+        img = tensor.detach().clone().to("cpu")
+        if img.dim() != 3:
+            return None
+        img = img.permute(1, 2, 0).contiguous().numpy()
+        img = np.clip(img, 0.0, 1.0)
+        img = (img * 255.0).astype(np.uint8)
+        return img
+
+    def _save_loop_closure_images(
+        self,
+        anchor_idx,
+        query_idx,
+        anchor_view,
+        query_view,
+        event,
+        ate_before,
+        ate_after,
+        accepted,
+    ):
+        if self.loop_closure_viz_dir is None:
+            return
+        try:
+            anchor_img = self._viewpoint_to_image(anchor_view)
+            query_img = self._viewpoint_to_image(query_view)
+            if anchor_img is None or query_img is None:
+                return
+            anchor_pil = Image.fromarray(anchor_img)
+            query_pil = Image.fromarray(query_img)
+
+            target_h = max(anchor_pil.height, query_pil.height)
+
+            def resize_to_height(img):
+                if img.height == target_h or img.height == 0:
+                    return img
+                new_w = max(1, int(round(img.width * target_h / max(1, img.height))))
+                return img.resize((new_w, target_h))
+
+            anchor_pil = resize_to_height(anchor_pil)
+            query_pil = resize_to_height(query_pil)
+
+            spacing = 10
+            combined_w = anchor_pil.width + spacing + query_pil.width
+            combined = Image.new("RGB", (combined_w, target_h), color=(0, 0, 0))
+            combined.paste(anchor_pil, (0, 0))
+            combined.paste(query_pil, (anchor_pil.width + spacing, 0))
+
+            draw = ImageDraw.Draw(combined)
+            status = "accepted" if accepted else "rejected"
+            score = event.get("score", 0.0)
+            inliers = event.get("inliers", 0)
+            ate_text = ""
+            if ate_before is not None and ate_after is not None:
+                ate_text = f"ATE {ate_before:.3f}->{ate_after:.3f}"
+            lines = [
+                f"anchor {anchor_idx} | query {query_idx}",
+                f"score={score:.3f} inliers={inliers} status={status}",
+            ]
+            if ate_text:
+                lines.append(ate_text)
+
+            y = 5
+            for line in lines:
+                draw.text((6, y + 1), line, fill=(0, 0, 0))
+                draw.text((5, y), line, fill=(255, 255, 255))
+                y += 14
+
+            filename = (
+                f"loop_{status}_anchor{anchor_idx:05d}_query{query_idx:05d}"
+                f"_score{score:.3f}_in{inliers}.png"
+            )
+            combined.save(os.path.join(self.loop_closure_viz_dir, filename))
+        except Exception as exc:
+            Log(f"Failed to save loop closure visualization: {exc}")
 
     def _apply_global_pose_corrections(self, optimized_nodes, exclude_ids=None):
         if not optimized_nodes:
@@ -710,6 +802,16 @@ class BackEnd(mp.Process):
                 f"Loop closure rejected anchor={anchor_idx} query={query_idx} "
                 f"(ATE {ate_before:.3f}->{ate_after_str})"
             )
+            self._save_loop_closure_images(
+                anchor_idx,
+                query_idx,
+                anchor,
+                query,
+                event,
+                ate_before,
+                ate_after_transform,
+                accepted=False,
+            )
             return
         if self.use_pose_graph:
             self.pose_graph.add_loop_edge(anchor_idx, query_idx, T_query_target)
@@ -766,6 +868,16 @@ class BackEnd(mp.Process):
                     "loop/metric_scale": metric_scale,
                 }
             )
+        self._save_loop_closure_images(
+            anchor_idx,
+            query_idx,
+            anchor,
+            query,
+            event,
+            ate_before,
+            ate_after,
+            accepted=True,
+        )
         self.push_to_frontend("loop_closure")
         if self.use_pose_graph and self.pose_graph_optimize_on_loop:
             self.pose_graph_loop_counter += 1
