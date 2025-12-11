@@ -320,16 +320,27 @@ def eval_ate(frames, kf_ids, save_dir, iterations, final=False, monocular=False)
         os.path.join(plot_dir, f"trj_{label_evo}.json"), "w", encoding="utf-8"
     ) as f:
         json.dump(trj_data, f, indent=4)
-
-    ate = evaluate_evo(
+        
+    # Automatically handle full vs. partial GT
+    results = evaluate_sequence_auto(
         poses_gt=trj_gt_np,
         poses_est=trj_est_np,
         plot_dir=plot_dir,
         label=label_evo,
-        monocular=monocular,
+        monocular=monocular
     )
-    wandb.log({"frame_idx": latest_frame_idx, "ate": ate})
-    return ate
+
+    # Log whatever metrics were available
+    wandb_data = {"frame_idx": latest_frame_idx}
+    wandb_data.update({
+        "ate": results.get("ate", None),
+        "rpe": results.get("rpe", None),
+        "start_end_alignment_error": results.get("start_end_alignment_error", None),
+        "drift_ratio": results.get("drift_ratio", None),
+    })
+    wandb.log(wandb_data)
+
+    return results
 
 
 def eval_rendering(
