@@ -139,6 +139,10 @@ class DinoClipLoopDetector:
         self.min_inlier_ratio = float(orb_cfg.get("min_inlier_ratio", 0.5))
         self.ransac_thresh = float(orb_cfg.get("ransac_thresh", 2.0))
         self.matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
+        validation_cfg = config.get("validation", {})
+        self.cycle_consistency_thresh = float(validation_cfg.get("cycle_ratio", 0.5))
+        self.max_reproj_error = float(validation_cfg.get("max_reproj_error", 3.0))
+        self.max_pose_condition = float(validation_cfg.get("max_pose_condition", 1e4))
 
         self.fx = float(intrinsics["fx"])
         self.fy = float(intrinsics["fy"])
@@ -166,6 +170,33 @@ class DinoClipLoopDetector:
             if query_idx - entry["kf_idx"] >= self.min_gap:
                 idxs.append(i)
         return idxs
+
+    def _cycle_consistency_ratio(
+        self,
+        matches: List[cv2.DMatch],
+        anchor_desc: np.ndarray,
+        query_desc: np.ndarray,
+    ) -> float:
+        if (
+            len(matches) == 0
+            or anchor_desc is None
+            or query_desc is None
+            or len(anchor_desc) == 0
+            or len(query_desc) == 0
+        ):
+            return 0.0
+        anchor_best = {}
+        reverse = self.matcher.knnMatch(anchor_desc, query_desc, k=1)
+        for pair in reverse:
+            if not pair:
+                continue
+            best = pair[0]
+            anchor_best[best.queryIdx] = best.trainIdx
+        mutual = 0
+        for m in matches:
+            if anchor_best.get(m.trainIdx, -1) == m.queryIdx:
+                mutual += 1
+        return mutual / max(1, len(matches))
 
     def _best_match(self, feats: List[np.ndarray], candidates: List[int]) -> Tuple[int, float]:
         if not candidates:
@@ -285,6 +316,9 @@ class DinoClipLoopDetector:
                 good.append(m)
         if len(good) < self.min_inliers:
             return None
+        cycle_ratio = self._cycle_consistency_ratio(good, anchor["desc"], query_desc)
+        if cycle_ratio < self.cycle_consistency_thresh:
+            return None
 
         obj_points = []
         img_points = []
@@ -318,6 +352,17 @@ class DinoClipLoopDetector:
             return None
         R, _ = cv2.Rodrigues(rvec)
         t = tvec.reshape(3)
+        proj, _ = cv2.projectPoints(obj, rvec, tvec, self.K, None)
+        proj = proj.reshape(-1, 2)
+        repro = np.linalg.norm(proj - img, axis=1)
+        rms = float(np.sqrt(np.mean(repro**2)))
+        if not np.isfinite(rms) or rms > self.max_reproj_error:
+            return None
+        centered = obj - obj.mean(axis=0, keepdims=True)
+        cov = centered.T @ centered
+        cond = np.linalg.cond(cov) if cov.size else np.inf
+        if not np.isfinite(cond) or cond > self.max_pose_condition:
+            return None
         rel_pose = np.eye(4, dtype=np.float32)
         rel_pose[:3, :3] = R
         rel_pose[:3, 3] = t

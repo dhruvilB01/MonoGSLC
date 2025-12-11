@@ -83,11 +83,6 @@ if HAS_GTSAM:
                 if i not in nodes or j not in nodes:
                     continue
                 measurement = edge["measurement"]
-                if edge["type"] == "loop":
-                    Twc_anchor = nodes.get(i)
-                    if Twc_anchor is None:
-                        continue
-                    measurement = np.linalg.inv(Twc_anchor) @ measurement
                 pose_rel = _mat_to_pose3(measurement)
                 if edge["type"] == "odom":
                     noise = odom_noise

@@ -93,19 +93,29 @@ pipeline_params:
   convert_SHs_python: False
   compute_cov3D_python: False
   
+PoseGraph:
+  enabled: True
+  optimize_on_loop: true
+  optimize_every_n_loops: 1
+  max_translation_delta: 3.0
+  max_rotation_delta_deg: 15.0
+  freeze_active_window: true
+
 LoopClosure:
   enabled: True
   detector: "dinoclip"
   models: ["dinov2", "clip-b32"]
   weights: [0.7, 0.3]
-  threshold: 0.92
-  min_gap: 300
-  cooldown: 120
-  max_db: 800
+  threshold: 0.85
+  min_gap: 120
+  cooldown: 60
+  max_db: null
   detector_stride: 1
   orb:
     nfeatures: 3000
     ratio_thresh: 0.7
-    min_inliers: 200
-    min_inlier_ratio: 0.7
+    min_inliers: 80
+    min_inlier_ratio: 0.55
     ransac_thresh: 2.0
+
+    

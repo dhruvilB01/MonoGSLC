@@ -198,15 +198,13 @@ class SLAM:
         pass
 
 
-if __name__ == "__main__":
+def cli_main(argv=None):
     # Set up command line argument parser
     parser = ArgumentParser(description="Training script parameters")
     parser.add_argument("--config", type=str)
     parser.add_argument("--eval", action="store_true")
 
-    args = parser.parse_args(sys.argv[1:])
-
-    mp.set_start_method("spawn")
+    args = parser.parse_args(argv or sys.argv[1:])
 
     with open(args.config, "r") as yml:
         config = yaml.safe_load(yml)
@@ -259,3 +257,7 @@ if __name__ == "__main__":
 
     # All done
     Log("Done.")
+
+
+if __name__ == "__main__":
+    cli_main()

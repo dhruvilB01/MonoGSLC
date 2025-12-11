@@ -43,22 +43,47 @@ Training:
   gaussian_update_every: 150
   gaussian_update_offset: 50
   gaussian_th: 0.7
-  gaussian_extent: 1.0
+  gaussian_extent: 0.5
   gaussian_reset: 2001
   size_threshold: 20
-  kf_interval: 5
-  window_size: 8
-  pose_window: 3
+  kf_interval: 2
+  window_size: 22
+  pose_window: 10
   edge_threshold: 1.1
   rgb_boundary_threshold: 0.01
+  motion_prior_weight: 0.01
+  motion_vel_weight: 0.1
+  motion_yaw_weight: 0.05
+  motion_rot_weight: 0.001
+  epi_weight: 0.000001
+  photometric_huber_delta: 0.03
+  depth_huber_delta: 0.05
+  scale_prior_weight: 0.0
+  scale_prior_target: 0.2
+  loop_sim3_max_span: 60
+  kf_rotation_deg: 1.0
+  kf_forward_ratio: 0.1
 
-  kf_translation: 0.08
+  kf_translation: 0.03
   kf_min_translation: 0.05
   kf_overlap: 0.9
   kf_cutoff: 0.3
   prune_mode: 'slam'
   single_thread: False
   spherical_harmonics: False
+  frame_stride: 1
+  motion_prior_weight: 0.01
+  motion_vel_weight: 0.1
+  motion_yaw_weight: 0.05
+  motion_rot_weight: 0.001
+  epi_weight: 0.000001
+  kf_acceptance:
+    scale_min: 0.4
+    scale_max: 2.5
+    yaw_deg_max: 25.0
+    curvature_deg_max: 120.0
+    straightness_min: 0.5
+    loss_growth_max: 1.05
 
   lr:
     cam_rot_delta: 0.003
@@ -94,19 +119,36 @@ pipeline_params:
   convert_SHs_python: False
   compute_cov3D_python: False
 
+PoseGraph:
+  enabled: True
+  optimize_on_loop: true
+  optimize_every_n_loops: 1
+  optimize_every_n_keyframes: null
+  max_translation_delta: 3.0
+  max_rotation_delta_deg: 15.0
+  freeze_active_window: false
+  extra_odometry_offsets: []
+
 LoopClosure:
   enabled: True
+  metric_scale: true
   detector: "dinoclip"
   models: ["dinov2", "clip-b32"]
   weights: [0.7, 0.3]
-  threshold: 0.92
-  min_gap: 300
-  cooldown: 120
-  max_db: 800
+  threshold: 0.8
+  min_gap: 60
+  cooldown: 30
+  max_db: null
   detector_stride: 1
   orb:
     nfeatures: 3000
     ratio_thresh: 0.7
-    min_inliers: 80
+    min_inliers: 60
     min_inlier_ratio: 0.55
     ransac_thresh: 2.0
+  validation:
+    cycle_ratio: 0.5
+    max_reproj_error: 3.0
+    max_pose_condition: 10000.0
+
+    
