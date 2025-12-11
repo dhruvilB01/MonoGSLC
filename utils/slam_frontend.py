@@ -1,4 +1,5 @@
 import time
+import math
 
 import numpy as np
 import torch
@@ -7,11 +8,13 @@ import torch.multiprocessing as mp
 from gaussian_splatting.gaussian_renderer import render
 from gaussian_splatting.utils.graphics_utils import getProjectionMatrix2, getWorld2View2
 from gui import gui_utils
+from loop_closure.dino_clip_detector import DinoClipLoopDetector
 from utils.camera_utils import Camera
 from utils.eval_utils import eval_ate, save_gaussians
 from utils.logging_utils import Log
 from utils.multiprocessing_utils import clone_obj
 from utils.pose_utils import update_pose
+from utils.pose_graph import PoseGraph
 from utils.slam_utils import get_loss_tracking, get_median_depth
 
 
@@ -37,11 +40,23 @@ class FrontEnd(mp.Process):
         self.requested_init = False
         self.requested_keyframe = 0
         self.use_every_n_frames = 1
+        self.kf_accept = self.config["Training"].get(
+            "kf_acceptance",
+            {
+                "scale_min": 0.5,
+                "scale_max": 2.0,
+                "yaw_deg_max": 45.0,
+                "straightness_min": 0.6,
+                "loss_growth_max": 1.1,
+            },
+        )
+        self.last_tracking_loss = None
 
         self.gaussians = None
         self.cameras = dict()
         self.device = "cuda:0"
         self.pause = False
+        self.loop_detector = None
 
     def set_hyperparams(self):
         self.save_dir = self.config["Results"]["save_dir"]
@@ -52,7 +67,153 @@ class FrontEnd(mp.Process):
         self.tracking_itr_num = self.config["Training"]["tracking_itr_num"]
         self.kf_interval = self.config["Training"]["kf_interval"]
         self.window_size = self.config["Training"]["window_size"]
+        self.use_every_n_frames = max(
+            1, int(self.config["Training"].get("frame_stride", 1))
+        )
         self.single_thread = self.config["Training"]["single_thread"]
+        loop_cfg = self.config.get("LoopClosure", {"enabled": False})
+        if loop_cfg.get("enabled", False):
+            intrinsics = {
+                "fx": self.dataset.fx,
+                "fy": self.dataset.fy,
+                "cx": self.dataset.cx,
+                "cy": self.dataset.cy,
+            }
+            self.loop_detector = DinoClipLoopDetector(loop_cfg, intrinsics)
+        else:
+            self.loop_detector = None
+
+    def _get_camera_position(self, cam, use_gt=False):
+        if cam is None:
+            return None
+        tensor = None
+        if use_gt and hasattr(cam, "T_gt") and cam.T_gt is not None:
+            tensor = cam.T_gt
+        else:
+            tensor = cam.T
+        if tensor is None:
+            return None
+        return tensor.detach().cpu().numpy()
+
+    def _compute_kf_metrics(self, cur_frame_idx, window=5):
+        sorted_ids = sorted(self.cameras.keys())
+        if cur_frame_idx not in sorted_ids:
+            return {}
+        idx = sorted_ids.index(cur_frame_idx)
+        if idx < 1:
+            return {}
+        cam_curr = self.cameras[cur_frame_idx]
+        cam_prev = self.cameras.get(sorted_ids[idx - 1])
+        if cam_prev is None:
+            return {}
+        p_curr = self._get_camera_position(cam_curr)
+        p_prev = self._get_camera_position(cam_prev)
+        if p_curr is None or p_prev is None:
+            return {}
+        delta_curr = p_curr - p_prev
+        dist_curr = np.linalg.norm(delta_curr)
+        metrics = {}
+        if idx >= 2:
+            cam_prevprev = self.cameras.get(sorted_ids[idx - 2])
+            if cam_prevprev is not None:
+                p_prevprev = self._get_camera_position(cam_prevprev)
+                if p_prevprev is not None:
+                    delta_prev = p_prev - p_prevprev
+                    dist_prev = np.linalg.norm(delta_prev)
+                    if dist_prev > 1e-6 and dist_curr > 1e-6:
+                        metrics["scale_ratio"] = dist_curr / dist_prev
+                        cosang = np.dot(delta_prev, delta_curr) / (
+                            dist_prev * dist_curr
+                        )
+                        cosang = float(np.clip(cosang, -1.0, 1.0))
+                        metrics["curvature_deg"] = math.degrees(math.acos(cosang))
+        heading = math.degrees(math.atan2(delta_curr[1], delta_curr[0])) if dist_curr > 1e-6 else 0.0
+        p_prev_gt = self._get_camera_position(cam_prev, use_gt=True)
+        p_curr_gt = self._get_camera_position(cam_curr, use_gt=True)
+        if p_prev_gt is not None and p_curr_gt is not None:
+            delta_gt = p_curr_gt - p_prev_gt
+            if np.linalg.norm(delta_gt) > 1e-6:
+                heading_gt = math.degrees(math.atan2(delta_gt[1], delta_gt[0]))
+                diff = heading - heading_gt
+                while diff > 180.0:
+                    diff -= 360.0
+                while diff < -180.0:
+                    diff += 360.0
+                metrics["yaw_drift"] = diff
+        start_idx = max(0, idx - (window - 1))
+        path_ids = sorted_ids[start_idx : idx + 1]
+        path_len = 0.0
+        for i in range(1, len(path_ids)):
+            a = self._get_camera_position(self.cameras[path_ids[i - 1]])
+            b = self._get_camera_position(self.cameras[path_ids[i]])
+            if a is None or b is None:
+                continue
+            path_len += np.linalg.norm(b - a)
+        if path_len > 1e-6:
+            p_start = self._get_camera_position(self.cameras[path_ids[0]])
+            if p_start is not None:
+                metrics["straightness"] = np.linalg.norm(p_curr - p_start) / path_len
+        return metrics
+
+    def _should_accept_keyframe(self, cur_frame_idx, viewpoint):
+        metrics = self._compute_kf_metrics(cur_frame_idx)
+        cfg = self.kf_accept
+        scale_ratio = metrics.get("scale_ratio")
+        if scale_ratio is not None:
+            if scale_ratio < cfg.get("scale_min", 0.5) or scale_ratio > cfg.get(
+                "scale_max", 2.0
+            ):
+                Log(
+                    f"Rejecting KF {cur_frame_idx}: scale_ratio={scale_ratio:.3f}"
+                )
+                return False
+        yaw_drift = metrics.get("yaw_drift")
+        if yaw_drift is not None:
+            if abs(yaw_drift) > cfg.get("yaw_deg_max", 45.0):
+                Log(f"Rejecting KF {cur_frame_idx}: yaw_drift={yaw_drift:.2f} deg")
+                return False
+        straightness = metrics.get("straightness")
+        if straightness is not None and straightness < cfg.get(
+            "straightness_min", 0.6
+        ):
+            Log(
+                f"Rejecting KF {cur_frame_idx}: straightness={straightness:.3f}"
+            )
+            return False
+        loss_growth_max = cfg.get("loss_growth_max", 1.1)
+        if (
+            hasattr(viewpoint, "tracking_loss")
+            and viewpoint.tracking_loss is not None
+            and self.last_tracking_loss is not None
+        ):
+            if viewpoint.tracking_loss > self.last_tracking_loss * loss_growth_max:
+                Log(
+                    f"Rejecting KF {cur_frame_idx}: tracking loss {viewpoint.tracking_loss:.4f} vs {self.last_tracking_loss:.4f}"
+                )
+                return False
+        self.last_tracking_loss = getattr(viewpoint, "tracking_loss", None)
+        return True
+
+    def _maybe_run_loop_closure(self, cur_frame_idx, viewpoint):
+        if self.loop_detector is None or not self.loop_detector.is_enabled():
+            return
+        color = (
+            viewpoint.original_image.detach()
+            .cpu()
+            .permute(1, 2, 0)
+            .numpy()
+        )
+        color = (np.clip(color, 0.0, 1.0) * 255).astype(np.uint8)
+        depth = viewpoint.depth
+        if isinstance(depth, torch.Tensor):
+            depth_np = depth.detach().cpu().numpy()
+        elif depth is None:
+            depth_np = None
+        else:
+            depth_np = np.array(depth)
+        detection = self.loop_detector.register_keyframe(cur_frame_idx, color, depth_np)
+        if detection is not None:
+            self.backend_queue.put(["loop_closure", detection])
 
     def add_new_keyframe(self, cur_frame_idx, depth=None, opacity=None, init=False):
         rgb_boundary_threshold = self.config["Training"]["rgb_boundary_threshold"]
@@ -174,6 +335,9 @@ class FrontEnd(mp.Process):
                 self.config, image, depth, opacity, viewpoint
             )
             loss_tracking.backward()
+            viewpoint.tracking_loss = float(
+                loss_tracking.detach().cpu().item()
+            )
 
             with torch.no_grad():
                 pose_optimizer.step()
@@ -211,9 +375,29 @@ class FrontEnd(mp.Process):
         pose_CW = getWorld2View2(curr_frame.R, curr_frame.T)
         last_kf_CW = getWorld2View2(last_kf.R, last_kf.T)
         last_kf_WC = torch.linalg.inv(last_kf_CW)
+        curr_frame_WC = torch.linalg.inv(pose_CW)
         dist = torch.norm((pose_CW @ last_kf_WC)[0:3, 3])
         dist_check = dist > kf_translation * self.median_depth
         dist_check2 = dist > kf_min_translation * self.median_depth
+
+        R_prev = last_kf_WC[:3, :3]
+        R_curr = curr_frame_WC[:3, :3]
+        R_rel = R_curr @ R_prev.transpose(0, 1)
+        delta_yaw = math.degrees(math.atan2(R_rel[1, 0], R_rel[0, 0]))
+        rotation_threshold = self.config["Training"].get("kf_rotation_deg", 1.0)
+        rotation_check = abs(delta_yaw) > rotation_threshold
+
+        center_prev = last_kf_WC[:3, 3]
+        center_curr = curr_frame_WC[:3, 3]
+        delta_world = center_curr - center_prev
+        forward_dir = R_prev[:, 2]
+        forward_motion = torch.dot(delta_world, forward_dir)
+        forward_ratio = self.config["Training"].get("kf_forward_ratio", 0.1)
+        forward_check = False
+        if self.median_depth is not None and self.median_depth > 1e-6:
+            forward_check = (
+                forward_motion > forward_ratio * float(self.median_depth)
+            )
 
         union = torch.logical_or(
             cur_frame_visibility_filter, occ_aware_visibility[last_keyframe_idx]
@@ -222,7 +406,12 @@ class FrontEnd(mp.Process):
             cur_frame_visibility_filter, occ_aware_visibility[last_keyframe_idx]
         ).count_nonzero()
         point_ratio_2 = intersection / union
-        return (point_ratio_2 < kf_overlap and dist_check2) or dist_check
+        return (
+            (point_ratio_2 < kf_overlap and dist_check2)
+            or dist_check
+            or rotation_check
+            or forward_check
+        )
 
     def add_to_window(
         self, cur_frame_idx, cur_frame_visibility_filter, occ_aware_visibility, window
@@ -381,7 +570,7 @@ class FrontEnd(mp.Process):
                 if self.reset:
                     self.initialize(cur_frame_idx, viewpoint)
                     self.current_window.append(cur_frame_idx)
-                    cur_frame_idx += 1
+                    cur_frame_idx += self.use_every_n_frames
                     continue
 
                 self.initialized = self.initialized or (
@@ -406,7 +595,7 @@ class FrontEnd(mp.Process):
 
                 if self.requested_keyframe > 0:
                     self.cleanup(cur_frame_idx)
-                    cur_frame_idx += 1
+                    cur_frame_idx += self.use_every_n_frames
                     continue
 
                 last_keyframe_idx = self.current_window[0]
@@ -454,9 +643,10 @@ class FrontEnd(mp.Process):
                     self.request_keyframe(
                         cur_frame_idx, viewpoint, self.current_window, depth_map
                     )
+                    self._maybe_run_loop_closure(cur_frame_idx, viewpoint)
                 else:
                     self.cleanup(cur_frame_idx)
-                cur_frame_idx += 1
+                cur_frame_idx += self.use_every_n_frames
 
                 if (
                     self.save_results
@@ -494,3 +684,20 @@ class FrontEnd(mp.Process):
                 elif data[0] == "stop":
                     Log("Frontend Stopped.")
                     break
+                elif data[0] == "pose_graph_opt":
+                    self._handle_pose_graph_opt(data)
+        while not self.backend_queue.empty():
+            self.backend_queue.get()
+        while not self.frontend_queue.empty():
+            self.frontend_queue.get()
+        return
+
+    def _handle_pose_graph_opt(self, data):
+        _, request_id, nodes, edges, fixed_ids = data
+        pose_graph = PoseGraph()
+        pose_graph.nodes = {int(k): np.asarray(v) for k, v in nodes.items()}
+        pose_graph.edges = edges
+        optimized = pose_graph.optimize(fixed_ids=set(fixed_ids or []))
+        self.backend_queue.put(
+            ["pose_graph_result", request_id, optimized, fixed_ids]
+        )

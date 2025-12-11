@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 import argparse
-import os
 import glob
 import json
+import os
 from dataclasses import dataclass
 from typing import List, Tuple, Dict, Optional
 
@@ -12,7 +12,7 @@ from PIL import Image, ImageDraw, ImageFont
 try:
     import cv2  # type: ignore
 except Exception as e:
-    raise SystemExit("OpenCV (cv2) is required. Install with: pip install opencv-python")
+    raise SystemExit("OpenCV (cv2) is required. Install with: pip install opencv-python") from e
 
 
 # ----------------------------- IO utils -----------------------------
@@ -42,35 +42,35 @@ class FrameFeatures:
     descriptors: np.ndarray  # (N, 32)
 
 
-def create_orb(nfeatures: int = 2000) -> cv2.ORB:
-    return cv2.ORB_create(
-        nfeatures=nfeatures,
-        scaleFactor=1.2,
-        nlevels=8,
-        edgeThreshold=31,
-        firstLevel=0,
-        WTA_K=2,
-        scoreType=cv2.ORB_HARRIS_SCORE,
-        patchSize=31,
-        fastThreshold=15,
+def create_fast_brief(nfeatures: int = 2000):
+    fast = cv2.FastFeatureDetector_create(
+        threshold=20,
+        nonmaxSuppression=True,
+        type=cv2.FAST_FEATURE_DETECTOR_TYPE_9_16,
     )
+    if not hasattr(cv2, "xfeatures2d"):
+        raise SystemExit(
+            "cv2.xfeatures2d.BriefDescriptorExtractor_create is required. Install opencv-contrib-python."
+        )
+    brief = cv2.xfeatures2d.BriefDescriptorExtractor_create(bytes=32)
+    return fast, brief
 
 
-def extract_orb(orb: cv2.ORB, img_gray: np.ndarray) -> Tuple[List[cv2.KeyPoint], np.ndarray]:
-    kps, desc = orb.detectAndCompute(img_gray, None)
+def extract_fast_brief(
+    fast: cv2.FastFeatureDetector, brief, img_gray: np.ndarray, max_kpts: int
+) -> Tuple[List[cv2.KeyPoint], np.ndarray]:
+    kps = fast.detect(img_gray, None)
+    # Keep top responses for speed
+    kps = sorted(kps, key=lambda k: -k.response)[:max_kpts]
+    kps, desc = brief.compute(img_gray, kps)
     if desc is None:
-        desc = np.zeros((0, 32), dtype=np.uint8)
+        desc = np.zeros((0, brief.descriptorSize()), dtype=np.uint8)
     return kps, desc
 
 
 def create_matcher() -> cv2.DescriptorMatcher:
-    # FLANN with LSH for ORB (binary) descriptors
-    index_params = dict(algorithm=6,  # FLANN_INDEX_LSH
-                        table_number=12,
-                        key_size=20,
-                        multi_probe_level=2)
-    search_params = dict(checks=64)
-    return cv2.FlannBasedMatcher(index_params, search_params)
+    # BRIEF is binary -> use Hamming
+    return cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
 
 
 @dataclass
@@ -105,7 +105,6 @@ def draw_label(img: Image.Image, text: str, height: int = 22) -> None:
         font = ImageFont.truetype("DejaVuSans.ttf", size=max(10, bar_h - 6))
     except Exception:
         font = ImageFont.load_default()
-    # Truncate long labels
     max_chars = max(10, int(W / 8))
     if len(text) > max_chars:
         text = text[: max_chars - 3] + "..."
@@ -161,15 +160,12 @@ def save_group_collage(paths: List[str], out_path: str, cols: int = 6, tile: int
 
 # ----------------------------- Online loop detection -----------------------------
 
-def knn_ratio_match(matcher: cv2.DescriptorMatcher, desc_q: np.ndarray, desc_t: np.ndarray, ratio: float) -> List[cv2.DMatch]:
+def knn_ratio_match(
+    matcher: cv2.DescriptorMatcher, desc_q: np.ndarray, desc_t: np.ndarray, ratio: float
+) -> List[cv2.DMatch]:
     if len(desc_q) == 0 or len(desc_t) == 0:
         return []
-    try:
-        knn = matcher.knnMatch(desc_q, desc_t, k=2)
-    except cv2.error:
-        # Fallback to BF when FLANN errors on small sets
-        bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
-        knn = bf.knnMatch(desc_q, desc_t, k=2)
+    knn = matcher.knnMatch(desc_q, desc_t, k=2)
     good = []
     for m, n in knn:
         if m.distance < ratio * n.distance:
@@ -178,7 +174,9 @@ def knn_ratio_match(matcher: cv2.DescriptorMatcher, desc_q: np.ndarray, desc_t: 
     return good
 
 
-def geometric_verification(kp_q, kp_t, matches: List[cv2.DMatch], ransac_thresh: float = 3.0) -> Tuple[int, float]:
+def geometric_verification(
+    kp_q: List[cv2.KeyPoint], kp_t: List[cv2.KeyPoint], matches: List[cv2.DMatch], ransac_thresh: float = 3.0
+) -> Tuple[int, float]:
     if len(matches) < 8:
         return 0, 0.0
     src = np.float32([kp_q[m.queryIdx].pt for m in matches])
@@ -201,28 +199,28 @@ def detect_loops_online(
     min_inlier_ratio: float = 0.5,
     search_stride: int = 1,
     max_db: Optional[int] = None,
+    max_kpts: int = 2000,
 ) -> Tuple[List[MatchResult], Dict[int, List[int]]]:
     os.makedirs(out_dir, exist_ok=True)
 
-    orb = create_orb()
+    fast, brief = create_fast_brief(nfeatures=max_kpts)
     matcher = create_matcher()
 
     database: List[FrameFeatures] = []
     matches_found: List[MatchResult] = []
-    groups: Dict[int, List[int]] = {}  # anchor_j -> list of i that matched
+    groups: Dict[int, List[int]] = {}
 
     for i, path in enumerate(frames):
         img = imread_rgb(path)
         gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-        kp_i, desc_i = extract_orb(orb, gray)
+        kp_i, desc_i = extract_fast_brief(fast, brief, gray, max_kpts=max_kpts)
 
         best: Optional[MatchResult] = None
-        # Search previous frames honoring min_gap and stride
         j_candidates = list(range(0, max(0, i - min_gap), search_stride))
         for j in j_candidates:
             ref = database[j]
             good = knn_ratio_match(matcher, desc_i, ref.descriptors, ratio_thresh)
-            if len(good) < min_inliers:  # quick reject
+            if len(good) < min_inliers:
                 continue
             inl, inl_ratio = geometric_verification(kp_i, ref.keypoints, good, ransac_thresh)
             if inl < min_inliers or inl_ratio < min_inlier_ratio:
@@ -231,24 +229,17 @@ def detect_loops_online(
             if best is None or (mr.score_inliers, mr.inlier_ratio) > (best.score_inliers, best.inlier_ratio):
                 best = mr
 
-        # Record and export evidence if we found a confident loop
         if best is not None:
             matches_found.append(best)
-            # Save a side-by-side collage
             title = f"Loop i={best.i} ↔ j={best.j}  inliers={best.score_inliers}  ratio={best.inlier_ratio:.2f}"
             out_path = os.path.join(out_dir, f"loop_i{best.i:05d}_j{best.j:05d}_inl{best.score_inliers}.png")
             save_pair_collage(frames[best.j], frames[best.i], out_path, tile=320, title=title)
-            # Group by anchor j
             groups.setdefault(best.j, []).append(best.i)
 
-        # Append current to database
         database.append(FrameFeatures(idx=i, path=path, keypoints=kp_i, descriptors=desc_i))
-        # Optional memory cap
         if max_db is not None and len(database) > max_db:
-            # Drop oldest to keep window; adjust groups keys/indices unaffected since we keep absolute indices
             database.pop(0)
 
-    # Export group collages (anchor + all matches)
     for anchor_j, idx_list in groups.items():
         paths = [frames[anchor_j]] + [frames[k] for k in sorted(idx_list)]
         title = f"Anchor j={anchor_j} with {len(idx_list)} revisits"
@@ -261,7 +252,7 @@ def detect_loops_online(
 # ----------------------------- CLI -----------------------------
 
 def main():
-    ap = argparse.ArgumentParser(description="Online feature-based loop detection over a frames directory")
+    ap = argparse.ArgumentParser(description="Online FAST+BRIEF loop detection over a frames directory")
     ap.add_argument("--frames_dir", required=True, help="Directory with sequential frames (images)")
     ap.add_argument("--out_dir", required=True, help="Directory to save loop evidence and collages")
     ap.add_argument("--min_gap", type=int, default=50, help="Minimum index gap between matches")
@@ -271,6 +262,7 @@ def main():
     ap.add_argument("--min_inlier_ratio", type=float, default=0.5, help="Minimum inliers/ good-matches ratio")
     ap.add_argument("--search_stride", type=int, default=1, help="Check every k-th previous frame for speed")
     ap.add_argument("--max_db", type=int, default=None, help="Optional cap on database size (sliding window)")
+    ap.add_argument("--max_kpts", type=int, default=2000, help="Max FAST keypoints per frame")
     ap.add_argument("--save_summary", type=str, default=None, help="Optional JSON path to write summary results")
     args = ap.parse_args()
 
@@ -288,9 +280,9 @@ def main():
         min_inlier_ratio=args.min_inlier_ratio,
         search_stride=args.search_stride,
         max_db=args.max_db,
+        max_kpts=args.max_kpts,
     )
 
-    # Estimate number of loops: count anchors with >= 1 revisit
     num_loops = sum(1 for _, lst in groups.items() if len(lst) >= 1)
 
     summary = {
@@ -302,6 +294,7 @@ def main():
         "min_inliers": args.min_inliers,
         "min_inlier_ratio": args.min_inlier_ratio,
         "search_stride": args.search_stride,
+        "max_kpts": args.max_kpts,
         "num_candidates": len(matches),
         "num_loop_groups": num_loops,
         "groups": {int(k): [int(x) for x in v] for k, v in groups.items()},

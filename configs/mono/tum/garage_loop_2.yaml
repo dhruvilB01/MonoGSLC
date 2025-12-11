@@ -4,33 +4,33 @@ Results:
   save_trj: True
   save_trj_kf_intv: 10
   use_gui: False
-
-  eval_rendering: False
+  eval_rendering: True
   use_wandb: True
 
 Dataset:
   type: 'tum'
   sensor_type: 'monocular'
-  dataset_path: "/media/trieu/TRIEU_DATA/garden_small_spring/garden_small_spring_TUM"
+  dataset_path: "/media/trieu/TRIEU_DATA/garage_2_loop/garage_tum"
   pcd_downsample: 64
   pcd_downsample_init: 32
   adaptive_pointsize: True
   point_size: 0.01
 
   Calibration:
-    fx: 306.4922725227081
-    fy: 306.14812355174007
-    cx: 320.22100395920455
-    cy: 234.9227867128218
-    k1: -0.04083806866524706
-    k2: 0.010512320631044807
-    p1: -0.020992672094212645
-    p2: 0.008848039004781132
-    k3: 0.0                # added: required by cv2.initUndistortRectifyMap
-    width: 640            # 4Seasons PiCam resolution
-    height: 480
-    distorted: False       # dataset is likely pre-rectified
-    depth_scale: 1.0       # safe default for monocular (no depth)
+    fx: 501.4757919305817
+    fy: 501.4757919305817
+    cx: 421.7953735163109
+    cy: 167.65799492501083
+    k1: 0.0
+    k2: 0.0
+    p1: 0.0
+    p2: 0.0
+    k3: 0.0
+    width: 800
+    height: 400
+    distorted: False
+    depth_scale: 1.0
+   
 
 Training:
   init_itr_num: 1050
@@ -43,22 +43,47 @@ Training:
   gaussian_update_every: 150
   gaussian_update_offset: 50
   gaussian_th: 0.7
-  gaussian_extent: 1.0
+  gaussian_extent: 0.5
   gaussian_reset: 2001
   size_threshold: 20
-  kf_interval: 5
-  window_size: 8
-  pose_window: 3
+  kf_interval: 2
+  window_size: 22
+  pose_window: 10
   edge_threshold: 1.1
   rgb_boundary_threshold: 0.01
+  motion_prior_weight: 0.01
+  motion_vel_weight: 0.1
+  motion_yaw_weight: 0.05
+  motion_rot_weight: 0.001
+  epi_weight: 0.000001
+  photometric_huber_delta: 0.03
+  depth_huber_delta: 0.05
+  scale_prior_weight: 0.0
+  scale_prior_target: 0.2
+  kf_rotation_deg: 1.0
+  kf_forward_ratio: 0.1
+  loop_sim3_max_span: 60
 
-  kf_translation: 0.08
+  kf_translation: 0.03
   kf_min_translation: 0.05
   kf_overlap: 0.9
   kf_cutoff: 0.3
   prune_mode: 'slam'
   single_thread: False
   spherical_harmonics: False
+  frame_stride: 1
+  motion_prior_weight: 0.01
+  motion_vel_weight: 0.1
+  motion_yaw_weight: 0.05
+  motion_rot_weight: 0.001
+  epi_weight: 0.000001
+  kf_acceptance:
+    scale_min: 0.4
+    scale_max: 2.5
+    yaw_deg_max: 25.0
+    curvature_deg_max: 120.0
+    straightness_min: 0.5
+    loss_growth_max: 1.05
 
   lr:
     cam_rot_delta: 0.003
@@ -93,30 +118,36 @@ model_params:
 pipeline_params:
   convert_SHs_python: False
   compute_cov3D_python: False
-  
+ 
 PoseGraph:
   enabled: True
   optimize_on_loop: true
   optimize_every_n_loops: 1
+  optimize_every_n_keyframes: null
   max_translation_delta: 3.0
   max_rotation_delta_deg: 15.0
-  freeze_active_window: true
+  freeze_active_window: false
+  extra_odometry_offsets: []
 
 LoopClosure:
   enabled: True
+  enable_rejection: false
+  metric_scale: true
   detector: "dinoclip"
   models: ["dinov2", "clip-b32"]
   weights: [0.7, 0.3]
-  threshold: 0.85
-  min_gap: 120
-  cooldown: 60
+  threshold: 0.8
+  min_gap: 60
+  cooldown: 30
   max_db: null
   detector_stride: 1
   orb:
     nfeatures: 3000
     ratio_thresh: 0.7
-    min_inliers: 80
+    min_inliers: 60
     min_inlier_ratio: 0.55
     ransac_thresh: 2.0
-
-    
+  validation:
+    cycle_ratio: 0.5
+    max_reproj_error: 3.0
+    max_pose_condition: 10000.0

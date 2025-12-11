@@ -1,6 +1,17 @@
 import torch
 
 
+def _robust_l1(residual: torch.Tensor, delta: float) -> torch.Tensor:
+    """
+    Huber-style robust L1 that smoothly transitions between L2 and L1.
+    """
+    delta = max(delta, 1e-6)
+    abs_res = torch.abs(residual)
+    quad = 0.5 * (abs_res**2) / delta
+    linear = abs_res - 0.5 * delta
+    return torch.where(abs_res <= delta, quad, linear)
+
+
 def image_gradient(image):
     # Compute image gradient using Scharr Filter
     c = image.shape[0]
@@ -67,8 +78,9 @@ def get_loss_tracking_rgb(config, image, depth, opacity, viewpoint):
     rgb_boundary_threshold = config["Training"]["rgb_boundary_threshold"]
     rgb_pixel_mask = (gt_image.sum(dim=0) > rgb_boundary_threshold).view(*mask_shape)
     rgb_pixel_mask = rgb_pixel_mask * viewpoint.grad_mask
-    l1 = opacity * torch.abs(image * rgb_pixel_mask - gt_image * rgb_pixel_mask)
-    return l1.mean()
+    delta = config["Training"].get("photometric_huber_delta", 0.03)
+    residual = opacity * (image * rgb_pixel_mask - gt_image * rgb_pixel_mask)
+    return _robust_l1(residual, delta).mean()
 
 
 def get_loss_tracking_rgbd(
@@ -84,7 +96,9 @@ def get_loss_tracking_rgbd(
 
     l1_rgb = get_loss_tracking_rgb(config, image, depth, opacity, viewpoint)
     depth_mask = depth_pixel_mask * opacity_mask
-    l1_depth = torch.abs(depth * depth_mask - gt_depth * depth_mask)
+    delta = config["Training"].get("depth_huber_delta", 0.05)
+    residual_depth = depth * depth_mask - gt_depth * depth_mask
+    l1_depth = _robust_l1(residual_depth, delta)
     return alpha * l1_rgb + (1 - alpha) * l1_depth.mean()
 
 
@@ -105,9 +119,9 @@ def get_loss_mapping_rgb(config, image, depth, viewpoint):
     rgb_boundary_threshold = config["Training"]["rgb_boundary_threshold"]
 
     rgb_pixel_mask = (gt_image.sum(dim=0) > rgb_boundary_threshold).view(*mask_shape)
-    l1_rgb = torch.abs(image * rgb_pixel_mask - gt_image * rgb_pixel_mask)
-
-    return l1_rgb.mean()
+    delta = config["Training"].get("photometric_huber_delta", 0.03)
+    residual = image * rgb_pixel_mask - gt_image * rgb_pixel_mask
+    return _robust_l1(residual, delta).mean()
 
 
 def get_loss_mapping_rgbd(config, image, depth, viewpoint, initialization=False):
@@ -122,10 +136,13 @@ def get_loss_mapping_rgbd(config, image, depth, viewpoint, initialization=False)
     rgb_pixel_mask = (gt_image.sum(dim=0) > rgb_boundary_threshold).view(*depth.shape)
     depth_pixel_mask = (gt_depth > 0.01).view(*depth.shape)
 
-    l1_rgb = torch.abs(image * rgb_pixel_mask - gt_image * rgb_pixel_mask)
-    l1_depth = torch.abs(depth * depth_pixel_mask - gt_depth * depth_pixel_mask)
-
-    return alpha * l1_rgb.mean() + (1 - alpha) * l1_depth.mean()
+    delta_rgb = config["Training"].get("photometric_huber_delta", 0.03)
+    delta_depth = config["Training"].get("depth_huber_delta", 0.05)
+    residual_rgb = image * rgb_pixel_mask - gt_image * rgb_pixel_mask
+    residual_depth = depth * depth_pixel_mask - gt_depth * depth_pixel_mask
+    return alpha * _robust_l1(residual_rgb, delta_rgb).mean() + (1 - alpha) * _robust_l1(
+        residual_depth, delta_depth
+    ).mean()
 
 
 def get_median_depth(depth, opacity=None, mask=None, return_std=False):

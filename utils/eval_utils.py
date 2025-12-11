@@ -5,7 +5,7 @@ import cv2
 import evo
 import numpy as np
 import torch
-from evo.core import metrics, trajectory
+from evo.core import metrics
 from evo.core.metrics import PoseRelation, Unit
 from evo.core.trajectory import PosePath3D, PoseTrajectory3D
 from evo.tools import plot
@@ -24,11 +24,13 @@ from utils.logging_utils import Log
 
 def evaluate_evo(poses_gt, poses_est, plot_dir, label, monocular=False):
     ## Plot
+
     traj_ref = PosePath3D(poses_se3=poses_gt)
     traj_est = PosePath3D(poses_se3=poses_est)
-    traj_est_aligned = trajectory.align_trajectory(
-        traj_est, traj_ref, correct_scale=monocular
+    traj_est_aligned = PosePath3D(
+        poses_se3=[pose.copy() for pose in traj_est.poses_se3]
     )
+    traj_est_aligned.align(traj_ref, correct_scale=monocular)
 
     ## RMSEimport json
 import os
@@ -58,9 +60,8 @@ def evaluate_evo(poses_gt, poses_est, plot_dir, label, monocular=False):
     ## Plot
     traj_ref = PosePath3D(poses_se3=poses_gt)
     traj_est = PosePath3D(poses_se3=poses_est)
-    traj_est_aligned = trajectory.align_trajectory(
-        traj_est, traj_ref, correct_scale=monocular
-    )
+    traj_est_aligned = PosePath3D(poses_se3=[pose.copy() for pose in traj_est.poses_se3])
+    traj_est_aligned.align(traj_ref, correct_scale=monocular)
 
     ## RMSE
     pose_relation = metrics.PoseRelation.translation_part
@@ -154,15 +155,26 @@ def eval_ate(frames, kf_ids, save_dir, iterations, final=False, monocular=False)
     ) as f:
         json.dump(trj_data, f, indent=4)
 
-    ate = evaluate_evo(
+    # Automatically handle full vs. partial GT
+    results = evaluate_sequence_auto(
         poses_gt=trj_gt_np,
         poses_est=trj_est_np,
         plot_dir=plot_dir,
         label=label_evo,
-        monocular=monocular,
+        monocular=monocular
     )
-    wandb.log({"frame_idx": latest_frame_idx, "ate": ate})
-    return ate
+
+    # Log whatever metrics were available
+    wandb_data = {"frame_idx": latest_frame_idx}
+    wandb_data.update({
+        "ate": results.get("ate", None),
+        "rpe": results.get("rpe", None),
+        "start_end_alignment_error": results.get("start_end_alignment_error", None),
+        "drift_ratio": results.get("drift_ratio", None),
+    })
+    wandb.log(wandb_data)
+
+    return results
 
 
 def eval_rendering(
@@ -409,6 +421,7 @@ def save_gaussians(gaussians, name, iteration, final=False):
         )
     gaussians.save_ply(os.path.join(point_cloud_path, "point_cloud.ply"))
 
+
 def evaluate_rpe(poses_gt, poses_est, plot_dir, label, delta=1):
     traj_ref = trajectory.PosePath3D(poses_se3=poses_gt)
     traj_est = trajectory.PosePath3D(poses_se3=poses_est)
@@ -480,3 +493,4 @@ def evaluate_sequence_auto(poses_gt, poses_est, plot_dir, label, monocular=False
         Log(f"Start-End error [m]: {start_end_err:.4f}, Drift ratio: {drift:.6f}", tag="Eval")
 
     return results
+
